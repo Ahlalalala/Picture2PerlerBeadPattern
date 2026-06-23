@@ -33,3 +33,4 @@ Thumbs.db
 # rembg / model caches are user-machine specific
 .u2net/
 dist/
+.workbuddy/

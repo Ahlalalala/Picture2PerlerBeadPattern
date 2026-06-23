@@ -20,6 +20,7 @@ except ImportError:
 from mard_palette import MARD_PALETTE, get_palette_dict
 from color_matcher import get_matcher
 from auto_cutout import remove_background, create_full_mask, apply_mask
+from cartoon_quantizer import quantize_cartoon_to_grid
 
 
 class BeadPatternTool:
@@ -46,6 +47,7 @@ class BeadPatternTool:
         self.color_ids = None
         self.edit_color = "A1"
         self._color_counts_list = []
+        self._protected_outline_ids = set()
 
         # ---- 画布状态 ----
         self.canvas_w = 750
@@ -547,7 +549,7 @@ class BeadPatternTool:
         self._cartoon_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(cf, text="启用卡通模式",
                         variable=self._cartoon_var).pack(anchor="w", padx=10, pady=(5, 0))
-        ttk.Label(cf, text="量化色彩，减少平涂区域的颜色碎片",
+        ttk.Label(cf, text="识别黑色轮廓，并统一平涂区域填色",
                   font=("Microsoft YaHei", 8), foreground="gray").pack(padx=10, anchor="w")
 
         # 显示设置
@@ -809,48 +811,44 @@ class BeadPatternTool:
         self.root.update()
 
         try:
-            src_w, src_h = self.selected_image.width, self.selected_image.height
-            scale = min(grid_w / src_w, grid_h / src_h)
-            new_w = max(1, int(src_w * scale))
-            new_h = max(1, int(src_h * scale))
-            pad_x = (grid_w - new_w) // 2
-            pad_y = (grid_h - new_h) // 2
+            protected_ids = set()
 
-            resized = self.selected_image.resize((new_w, new_h), Image.LANCZOS)
-            grid_img = Image.new("RGBA", (grid_w, grid_h), (0, 0, 0, 0))
-            grid_img.paste(resized, (pad_x, pad_y))
-
-            # 卡通模式：双边滤波(保边) + 梯度加权K-Means(保护描边)
             if self._cartoon_var.get():
-                k = max(2, self.max_colors_var.get()) if self.max_colors_var.get() > 0 else 32
-                k = min(k, 64)  # 上限64，避免过慢
-                self.status_var.set("卡通模式: 边缘保留滤波...")
+                self.status_var.set("卡通模式: 识别轮廓和平涂区域...")
                 self.root.update()
-                arr_rgba = np.array(grid_img)
-                # 第1步：双边滤波，平滑平涂区域去噪，保留描边不被模糊
-                smoothed_rgb = self._bilateral_smooth(arr_rgba[:, :, :3],
-                                                       radius=2, sigma_color=25.0,
-                                                       iterations=3)
-                # 第2步：梯度加权K-Means，描边/线条像素权重放大30倍
-                self.status_var.set(f"卡通模式: K-Means聚类 (K={k})...")
-                self.root.update()
-                quantized_rgb = self._kmeans_quantize(smoothed_rgb, k)
-                arr_rgba[:, :, :3] = quantized_rgb
-                grid_img = Image.fromarray(arr_rgba, "RGBA")
+                cartoon_result = quantize_cartoon_to_grid(
+                    self.selected_image, grid_w, grid_h, self.matcher,
+                    self.PALETTE_DICT)
+                color_ids = cartoon_result.color_ids
+                color_counts = cartoon_result.color_counts
+                protected_ids = cartoon_result.protected_ids
+            else:
+                src_w, src_h = self.selected_image.width, self.selected_image.height
+                scale = min(grid_w / src_w, grid_h / src_h)
+                new_w = max(1, int(src_w * scale))
+                new_h = max(1, int(src_h * scale))
+                pad_x = (grid_w - new_w) // 2
+                pad_y = (grid_h - new_h) // 2
 
-            rgba_array = np.array(grid_img)
-            color_ids, color_counts = self.matcher.match_image_fast(rgba_array)
+                resized = self.selected_image.resize((new_w, new_h), Image.LANCZOS)
+                grid_img = Image.new("RGBA", (grid_w, grid_h), (0, 0, 0, 0))
+                grid_img.paste(resized, (pad_x, pad_y))
+                rgba_array = np.array(grid_img)
+                color_ids, color_counts = self.matcher.match_image_fast(rgba_array)
 
             # 提前设置网格尺寸（_merge_colors需要引用）
             self.grid_w = grid_w
             self.grid_h = grid_h
+            self._protected_outline_ids = protected_ids
 
             # 颜色合并
             max_c = self.max_colors_var.get()
             if max_c > 0 and len(color_counts) > max_c:
                 self.status_var.set(f"正在合并颜色 ({len(color_counts)} → {max_c})...")
                 self.root.update()
-                color_ids = self._merge_colors(color_ids, max_c, color_counts)
+                color_ids = self._merge_colors(
+                    color_ids, max_c, color_counts,
+                    protected_ids=protected_ids)
 
             self.color_ids = color_ids
             self._rebuild_color_counts()
@@ -862,9 +860,25 @@ class BeadPatternTool:
             traceback.print_exc()
             messagebox.showerror("错误", f"生成失败:\n{e}")
 
-    def _merge_colors(self, color_ids, target_count, color_counts):
-        """合并颜色直到数量 <= target_count，使用CIEDE2000距离"""
+    def _merge_colors(self, color_ids, target_count, color_counts,
+                      protected_ids=None):
+        """合并颜色直到数量 <= target_count，使用CIEDE2000距离.
+
+        protected_ids are kept as-is and are not used as fill merge targets.
+        This prevents cartoon outlines from being swallowed by nearby browns.
+        """
         counts = dict(color_counts)
+        protected_ids = {str(cid) for cid in (protected_ids or set())}
+
+        def is_protected(cid):
+            return str(cid) in protected_ids
+
+        if protected_ids:
+            protected_count = sum(1 for cid in counts if is_protected(cid))
+            fill_count = len(counts) - protected_count
+            min_target = protected_count + (1 if fill_count > 0 else 0)
+            target_count = max(target_count, min_target)
+
         # 预计算所有颜色的LAB
         lab_cache = {}
         for cid in counts:
@@ -873,19 +887,24 @@ class BeadPatternTool:
 
         while len(counts) > target_count:
             # 找最少使用的颜色
-            least = min(counts, key=counts.get)
+            merge_sources = [cid for cid in counts if not is_protected(cid)]
+            if not merge_sources:
+                break
+            least = min(merge_sources, key=counts.get)
             least_lab = lab_cache[least]
 
             # 找CIEDE2000最近的邻居
             best = None
             best_de = float('inf')
             for cid in counts:
-                if cid == least:
+                if cid == least or is_protected(cid):
                     continue
                 de = self._ciede2000_single(least_lab, lab_cache[cid])
                 if de < best_de:
                     best_de = de
                     best = cid
+            if best is None:
+                break
 
             # 替换
             for y in range(self.grid_h):
@@ -1203,6 +1222,9 @@ class BeadPatternTool:
         if count == 0:
             messagebox.showinfo("提示", f"图纸中没有 {src}")
             return
+        if str(src) in self._protected_outline_ids:
+            self._protected_outline_ids.discard(str(src))
+            self._protected_outline_ids.add(str(dst))
         self._rebuild_color_counts()
         self._update_stats_display()
         self._update_replace_combos()
@@ -1218,7 +1240,15 @@ class BeadPatternTool:
                 cid = self.color_ids[y, x]
                 if cid is not None:
                     counts[cid] = counts.get(cid, 0) + 1
-        self._color_counts_list = sorted(counts.items(), key=lambda x: -x[1])
+        protected = {str(cid) for cid in getattr(self, "_protected_outline_ids", set())}
+        if protected:
+            self._color_counts_list = sorted(
+                counts.items(),
+                key=lambda x: (0 if str(x[0]) in protected else 1,
+                               -x[1], str(x[0]))
+            )
+        else:
+            self._color_counts_list = sorted(counts.items(), key=lambda x: -x[1])
 
     def _update_stats_display(self):
         """更新统计文本"""
@@ -2114,6 +2144,7 @@ class BeadPatternTool:
         self.original_image = self.mask = self.initial_mask = None
         self.selected_image = self.bead_pattern = self.color_ids = None
         self.grid_w = self.grid_h = None
+        self._protected_outline_ids = set()
         self._stage_params.clear()  # 清除所有阶段参数缓存
         self._undo_stack.clear()
         self.stage = 1
