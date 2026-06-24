@@ -32,5 +32,10 @@ Thumbs.db
 
 # rembg / model caches are user-machine specific
 .u2net/
-dist/
-.workbuddy/
+
+# AI model weights should be downloaded by users, not committed
+*.onnx
+*.pth
+*.pt
+*.ckpt
+*.safetensors

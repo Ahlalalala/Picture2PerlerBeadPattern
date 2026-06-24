@@ -22,8 +22,9 @@ def remove_background(image):
         from rembg import remove
     except ImportError:
         raise ImportError(
-            "需要安装rembg库: pip install rembg\n"
-            "首次运行会自动下载ONNX模型文件(约176MB)"
+            "需要安装rembg库: pip install \"rembg[cpu]\"\n"
+            "首次运行会自动下载u2net.onnx模型文件(约176MB)，"
+            "也可按README手动放到用户目录的.u2net缓存中。"
         )
 
     # 确保输入为RGB
@@ -42,11 +43,23 @@ def remove_background(image):
     else:
         # 如果rembg返回RGB(不太可能但安全处理)
         # 将白色区域以外设为前景
-        import cv2
-        gray = np.array(result.convert("RGB"))
-        # 使用Otsu阈值
-        gray_gray = cv2.cvtColor(gray, cv2.COLOR_RGB2GRAY)
-        _, mask = cv2.threshold(gray_gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        gray = np.array(result.convert("L"))
+        hist = np.bincount(gray.ravel(), minlength=256).astype(np.float64)
+        total = gray.size
+        cumulative_weight = np.cumsum(hist)
+        cumulative_mean = np.cumsum(hist * np.arange(256))
+        global_mean = cumulative_mean[-1]
+
+        numerator = (global_mean * cumulative_weight - cumulative_mean) ** 2
+        denominator = cumulative_weight * (total - cumulative_weight)
+        variance = np.divide(
+            numerator,
+            denominator,
+            out=np.zeros_like(numerator),
+            where=denominator > 0,
+        )
+        threshold = int(np.argmax(variance))
+        mask = Image.fromarray((gray > threshold).astype(np.uint8) * 255, "L")
 
     # 确保mask为mode='L'
     if mask.mode != "L":

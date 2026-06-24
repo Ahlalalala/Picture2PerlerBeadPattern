@@ -409,9 +409,18 @@ class BeadPatternTool:
             self.initial_mask = self.mask.copy()
             self.root.after(0, self._show_stage2)
         except ImportError as e:
-            self.root.after(0, lambda: messagebox.showerror("缺少依赖", str(e)))
+            self.root.after(0, self._show_auto_cutout_error, "缺少依赖", str(e))
         except Exception as e:
-            self.root.after(0, lambda: messagebox.showerror("错误", f"自动抠图失败:\n{e}"))
+            self.root.after(
+                0,
+                self._show_auto_cutout_error,
+                "错误",
+                f"自动抠图失败:\n{e}",
+            )
+
+    def _show_auto_cutout_error(self, title, message):
+        self.status_var.set("自动抠图失败，可取消自动抠图后继续")
+        messagebox.showerror(title, message)
 
     # ==================================================================
     # 阶段 2：选区精修

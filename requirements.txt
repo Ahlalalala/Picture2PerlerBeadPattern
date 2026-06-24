@@ -1,5 +1,5 @@
 pillow>=10.0
 numpy>=1.26
-rembg>=2.0
+rembg[cpu]>=2.0.76,<3
 windnd>=1.0.7; platform_system == "Windows"
 pyinstaller>=6.0

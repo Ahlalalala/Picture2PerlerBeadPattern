@@ -44,7 +44,7 @@ PictureConverting/
 ## 运行环境
 
 - 操作系统：Windows 优先，macOS/Linux 可运行源码但拖放和字体效果可能不同。
-- Python：建议 3.10 到 3.12。
+- Python：建议 3.11 到 3.13。自动抠图依赖的 `rembg>=2.0.76` 需要 Python 3.11+。
 - GUI：使用 Python 标准库 `tkinter`。部分 Python 发行版需要额外安装 Tk 支持。
 
 ## 安装依赖
@@ -58,7 +58,57 @@ python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
+`requirements.txt` 使用 `rembg[cpu]`，会同时安装 ONNX Runtime 的 CPU 后端。若你有明确的 CUDA/ROCm 环境，也可以参考 `rembg` 官方说明改用 GPU 后端。
+
 如果只想跳过自动抠图功能，可以不安装 `rembg`，并在软件第一步取消“自动抠出主体”。但完整功能推荐安装全部依赖。
+
+## 阶段 1 AI 自动抠图模型
+
+阶段 1 的“自动抠出主体 (AI)”通过第三方库 [`rembg`](https://github.com/danielgatis/rembg) 完成，当前默认使用 `u2net` 会话。相关上游引用：
+
+- `rembg`：背景移除 Python 库，仓库为 <https://github.com/danielgatis/rembg>，包元数据标注为 MIT License。
+- `u2net.onnx`：`rembg` 默认通用主体分割模型，首次运行时会从 `rembg` 的 GitHub Release 下载：<https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net.onnx>。
+- U^2-Net 原始项目：<https://github.com/xuebinqin/U-2-Net>。
+
+本仓库不内置、不二次分发 `u2net.onnx` 或其他 AI 模型权重；GitHub 提交时保留 README 中的上游引用即可。公开发布或商业分发前，建议按你的发布用途再次复核第三方依赖和模型权重的许可证要求。
+
+### 手动安装模型
+
+联网环境下无需手动处理：首次启用自动抠图时，`rembg` 会自动下载模型并缓存。网络较慢、无法访问 GitHub 或需要离线部署时，可手动安装：
+
+1. 下载模型文件 `u2net.onnx`：
+
+   ```text
+   https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net.onnx
+   ```
+
+2. 放到 `rembg` 默认缓存目录，文件名必须保持为 `u2net.onnx`：
+
+   ```text
+   Windows: %USERPROFILE%\.u2net\u2net.onnx
+   示例:    C:\Users\<你的用户名>\.u2net\u2net.onnx
+
+   macOS/Linux: ~/.u2net/u2net.onnx
+   ```
+
+3. Windows PowerShell 可用下面的命令创建目录并下载：
+
+   ```powershell
+   New-Item -ItemType Directory -Force "$env:USERPROFILE\.u2net"
+   Invoke-WebRequest `
+     -Uri "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net.onnx" `
+     -OutFile "$env:USERPROFILE\.u2net\u2net.onnx"
+   ```
+
+4. 如需放到自定义目录，设置 `U2NET_HOME`，并把模型放到该目录下：
+
+   ```powershell
+   $env:U2NET_HOME = "D:\models\u2net"
+   New-Item -ItemType Directory -Force $env:U2NET_HOME
+   # 将 u2net.onnx 放到 D:\models\u2net\u2net.onnx
+   ```
+
+   需要永久生效可执行 `setx U2NET_HOME "D:\models\u2net"`，然后重新打开终端或软件。
 
 ## 启动软件
 
@@ -114,7 +164,7 @@ bead_pattern_H7.png        # H7 色号分色图纸
 
 - `mard_palette.py`：维护 MARD 色号、HEX 和 RGB 数据。
 - `color_matcher.py`：把 RGB 转换到 CIE LAB 色彩空间，并使用 CIEDE2000 计算输入颜色与色卡颜色的感知色差。
-- `auto_cutout.py`：调用 `rembg` 移除背景，并把 alpha 通道转换为前景 mask。
+- `auto_cutout.py`：调用 `rembg` 的 `u2net` 模型移除背景，并把 alpha 通道转换为前景 mask。
 - `bead_pattern_tool.py`：管理 GUI 阶段、选区编辑、图纸生成、预览渲染和 PNG 导出。
 
 ## 打包 Windows 可执行文件
@@ -152,17 +202,17 @@ dist/拼豆图纸生成工具/
 - `dist/`
 - `__pycache__/`
 - `.venv/`
-- rembg 下载的模型缓存
+- rembg 下载的模型缓存，例如 `.u2net/`、`u2net.onnx` 或其他 `.onnx` 权重文件
 
 如果需要提供现成安装包，请使用 GitHub Releases 上传压缩包。
 
 ## 已知注意事项
 
-- `rembg` 首次自动抠图需要下载模型文件，网络较慢时可能等待较久。
+- `rembg` 首次自动抠图需要下载 `u2net.onnx` 模型文件，网络较慢时可能等待较久；可按上文手动放到 `.u2net` 缓存目录。
 - 大尺寸图纸、较大 bead size 或开启色号显示时，渲染和导出会更耗时。
 - 中文字体依赖系统字体，Windows 下效果最佳。
 - 色卡 RGB 数据来自整理后的 MARD 色号表，实际拼豆批次、屏幕显示和打印效果可能存在色差。
 
 ## 许可
 
-当前仓库尚未包含开源许可证。公开发布前建议根据你的发布意图添加 `LICENSE` 文件，例如 MIT、Apache-2.0 或其他许可证。
+当前仓库尚未包含开源许可证。公开发布前建议根据你的发布意图添加 `LICENSE` 文件，例如 MIT、Apache-2.0 或其他许可证。第三方依赖和 AI 模型由各自上游许可证约束，本项目通过 README 标注引用，不在仓库中提交模型权重。
