@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['src/bead_pattern_tool.py'],
+    ['../src/bead_pattern_tool.py'],
     pathex=['src'],
     binaries=[],
     datas=[],
