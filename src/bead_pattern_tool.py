@@ -5,6 +5,7 @@
 """
 
 import os
+import json
 import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -74,6 +75,12 @@ class BeadPatternTool:
 
         # ---- 拖放 ----
         self._dnd_pending_paths = []
+        self._stage1_drop_hover = False
+        self._last_loaded_name = None
+
+        # ---- 本地设置 ----
+        self._settings_path = self._get_settings_path()
+        self._settings = self._load_settings()
 
         # ---- 预览渲染参数 ----
         self._preview_bead_size = 20
@@ -210,10 +217,8 @@ class BeadPatternTool:
         # 鼠标滚轮 - 路由到正确的widget
         # 鼠标在左侧画布上 → 平移图纸 / 缩放
         # 鼠标在右侧面板上 → 滚动面板
-        self.canvas.bind("<Enter>",
-                         lambda e: self.root.bind_all("<MouseWheel>", self._on_canvas_mousewheel))
-        self.canvas.bind("<Leave>",
-                         lambda e: self.root.unbind_all("<MouseWheel>"))
+        self.canvas.bind("<Enter>", self._on_canvas_enter, add="+")
+        self.canvas.bind("<Leave>", self._on_canvas_leave, add="+")
 
         self._ctrl_canvas.bind("<Enter>",
                                lambda e: self.root.bind_all("<MouseWheel>", self._on_ctrl_scroll))
@@ -227,6 +232,44 @@ class BeadPatternTool:
     def _clear_ctrl(self):
         for w in self.ctrl_content.winfo_children():
             w.destroy()
+
+    def _get_settings_path(self):
+        """返回用户级设置文件路径。"""
+        if os.name == "nt" and os.environ.get("APPDATA"):
+            base = os.path.join(os.environ["APPDATA"], "PictureConverting")
+        else:
+            base = os.path.join(os.path.expanduser("~"), ".picture_converting")
+        return os.path.join(base, "settings.json")
+
+    def _load_settings(self):
+        """读取轻量本地设置，失败时静默使用默认值。"""
+        try:
+            with open(self._settings_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def _save_settings(self):
+        """保存轻量本地设置，不影响主流程。"""
+        try:
+            os.makedirs(os.path.dirname(self._settings_path), exist_ok=True)
+            with open(self._settings_path, "w", encoding="utf-8") as f:
+                json.dump(self._settings, f, ensure_ascii=False, indent=2)
+        except OSError:
+            pass
+
+    def _remember_image_dir(self, path):
+        folder = os.path.dirname(os.path.abspath(path))
+        if os.path.isdir(folder):
+            self._settings["last_image_dir"] = folder
+            self._save_settings()
+
+    def _get_initial_image_dir(self):
+        folder = self._settings.get("last_image_dir")
+        if folder and os.path.isdir(folder):
+            return folder
+        return os.path.expanduser("~")
 
     # ==================================================================
     # 撤回系统
@@ -340,6 +383,7 @@ class BeadPatternTool:
         self.stage = 1
         self._clear_ctrl()
         self.canvas.delete("all")
+        self._stage1_drop_hover = False
 
         ttk.Label(self.ctrl_content, text="阶段 1：加载图片",
                   font=("Microsoft YaHei", 14, "bold")).pack(pady=(10, 15))
@@ -363,31 +407,81 @@ class BeadPatternTool:
 
         ttk.Separator(self.ctrl_content, orient="horizontal").pack(fill="x", pady=15, padx=5)
         self.next_btn = ttk.Button(self.ctrl_content, text="下一步 →",
-                                   command=self._go_stage2, state="disabled")
+                                   command=self._go_stage2,
+                                   state="normal" if self.original_image else "disabled")
         self.next_btn.pack(fill="x", pady=5, padx=5)
         self._restore_stage_params(1)
-        self.status_var.set("就绪 - 请选择图片开始")
+        if self.original_image is not None:
+            self._display_image(self.original_image)
+            if self._last_loaded_name:
+                self.status_var.set(f"已加载: {self._last_loaded_name} "
+                                    f"({self.original_image.width}×{self.original_image.height})")
+            else:
+                self.status_var.set("已加载图片，可继续下一步")
+        else:
+            self._draw_stage1_drop_hint()
+            self.status_var.set("就绪 - 请选择图片开始")
 
     def _load_image(self):
         path = filedialog.askopenfilename(
             title="选择图片",
             filetypes=[("图片文件", "*.jpg *.jpeg *.png *.bmp *.webp *.tiff *.gif"),
                        ("所有文件", "*.*")],
-            initialdir=os.path.expanduser("~"))
+            initialdir=self._get_initial_image_dir())
         if path:
             self._load_image_from_path(path)
 
     def _load_image_from_path(self, path):
         try:
             self.original_image = Image.open(path).convert("RGBA")
+            self._last_loaded_name = os.path.basename(path)
+            self._remember_image_dir(path)
             self._stage_params.clear()  # 换图时清除所有阶段参数缓存
             self._undo_stack.clear()
-            self.status_var.set(f"已加载: {os.path.basename(path)} "
+            self.status_var.set(f"已加载: {self._last_loaded_name} "
                                 f"({self.original_image.width}×{self.original_image.height})")
             self.next_btn.config(state="normal")
             self._display_image(self.original_image)
         except Exception as e:
             messagebox.showerror("错误", f"无法加载图片:\n{e}")
+
+    def _draw_stage1_drop_hint(self, hover=False):
+        """阶段1空画布的拖放提示。"""
+        self.canvas.delete("all")
+        self.canvas.configure(bg="#eef6ff" if hover else "#f4f7fb")
+        margin = 38
+        w = max(120, self.canvas_w)
+        h = max(100, self.canvas_h)
+        outline = "#1f6feb" if hover else "#8aa4c4"
+        fill = "#dbeafe" if hover else "#f8fbff"
+        self.canvas.create_rectangle(
+            margin, margin, w - margin, h - margin,
+            outline=outline, width=3, dash=(9, 6), fill=fill,
+            tags=("stage1_drop_hint",))
+        title = "释放图片到这里" if hover else "拖放图片到这里"
+        subtitle = "或点击右侧「选择图片...」导入"
+        self.canvas.create_text(
+            w // 2, h // 2 - 18, text=title,
+            font=("Microsoft YaHei", 22, "bold"), fill="#184a8b",
+            tags=("stage1_drop_hint",))
+        self.canvas.create_text(
+            w // 2, h // 2 + 22, text=subtitle,
+            font=("Microsoft YaHei", 12), fill="#5a6f88",
+            tags=("stage1_drop_hint",))
+
+    def _on_canvas_enter(self, event=None):
+        self.root.bind_all("<MouseWheel>", self._on_canvas_mousewheel)
+        if self.stage == 1 and self.original_image is None:
+            self._stage1_drop_hover = True
+            self._draw_stage1_drop_hint(hover=True)
+            self.status_var.set("可拖放区域 - 将图片释放到左侧画布即可导入")
+
+    def _on_canvas_leave(self, event=None):
+        self.root.unbind_all("<MouseWheel>")
+        if self.stage == 1 and self.original_image is None:
+            self._stage1_drop_hover = False
+            self._draw_stage1_drop_hint(hover=False)
+            self.status_var.set("就绪 - 请选择图片开始")
 
     def _go_stage2(self):
         if self.original_image is None:
@@ -1152,15 +1246,19 @@ class BeadPatternTool:
                 tag = f"cell_{item['id']}"
                 rect = c.create_rectangle(cx, cy, cx + cell_size, cy + cell_size,
                                           fill=hex_c, outline="#999", width=1, tags=(tag,))
-                # 色号文字
-                txt = c.create_text(cx + cell_size // 2, cy + cell_size // 2,
-                                    text=item['id'], font=("Consolas", 8), fill=fg, tags=(tag,))
                 # 标记已使用的颜色
+                used_mark = None
                 if item['id'] in used:
-                    c.create_rectangle(cx, cy, cx + cell_size, cy + 2,
-                                       fill="#333", outline="", tags=(tag,))
-                # 将矩形放在最上面以保证视觉正确
-                c.tag_raise(rect, txt)
+                    used_mark = c.create_rectangle(cx, cy, cx + cell_size, cy + 3,
+                                                   fill="#222", outline="", tags=(tag,))
+                # 色号文字保持在最上层；深色块用浅色字，浅色块用深色字
+                txt = c.create_text(cx + cell_size // 2, cy + cell_size // 2,
+                                    text=item['id'], font=("Consolas", 8, "bold"),
+                                    fill=fg, tags=(tag,))
+                c.tag_lower(rect)
+                if used_mark is not None:
+                    c.tag_raise(used_mark, rect)
+                c.tag_raise(txt)
                 # 整个tag组绑定点击（文字在上层也能响应）
                 c.tag_bind(tag, "<Button-1>",
                            lambda e, cid=item['id']: self._palette_select(cid))
@@ -1445,6 +1543,8 @@ class BeadPatternTool:
             self._display_edit_image()
         elif self.original_image is not None:
             self._display_image(self.original_image)
+        elif self.stage == 1:
+            self._draw_stage1_drop_hint(self._stage1_drop_hover)
 
     def _canvas_to_image(self, cx, cy):
         return int((cx - self.offset_x) / self.scale), int((cy - self.offset_y) / self.scale)
@@ -1727,6 +1827,7 @@ class BeadPatternTool:
 
     def _display_image(self, img):
         self.canvas.delete("all")
+        self.canvas.configure(bg="#e0e0e0")
         if img is None:
             return
         dw, dh = self._calc_fit_scale(img)

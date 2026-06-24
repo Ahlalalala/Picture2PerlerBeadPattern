@@ -169,11 +169,22 @@ bead_pattern_H7.png        # H7 色号分色图纸
 
 ## 打包 Windows 可执行文件
 
-安装依赖后，在项目根目录执行：
+在 Windows 终端或 PowerShell 中进入项目根目录，先创建并启用虚拟环境，再安装依赖：
 
-```bash
-pyinstaller --clean --noconfirm packaging/拼豆图纸生成工具.spec
+```powershell
+python -m venv .venv
+.\.venv\Scripts\activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 ```
+
+然后执行 PyInstaller 打包命令：
+
+```powershell
+python -m PyInstaller --clean --noconfirm packaging\拼豆图纸生成工具.spec
+```
+
+`packaging\拼豆图纸生成工具.spec` 已经配置使用现有封面/图标 `assets\bead.ico`，不需要额外添加 `--icon` 参数。
 
 构建完成后，结果位于：
 
